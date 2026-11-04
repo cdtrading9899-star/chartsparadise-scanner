@@ -3,8 +3,8 @@
 """
 Momentum -> Tight Consolidation -> Trigger scanner for NSE stocks (Yahoo Finance data)
 ======================================================================================
-Reverse-engineered from 19 "ChartsParadise" TradingView alert screenshots (17 stocks,
-Sep-Oct 2026).  Runs on Google Colab (also plain Python 3.10+).
+Reverse-engineered from 20 "ChartsParadise" TradingView alert screenshots (18 stocks,
+Sep-Nov 2026).  Runs on Google Colab (also plain Python 3.10+).
 
 WHAT IT DOES
   1. Downloads the NSE equity list and ~2 years of daily data from Yahoo Finance.
@@ -20,7 +20,7 @@ WHAT IT DOES
   3. Tracks what happened after each alert (trigger hit? stopped? 2R?) so you can verify.
   4. Shows chart snapshots inline, saves them as PNG, and writes an Excel workbook.
   5. Zips Excel + charts + rules into one file (auto-downloads in Colab).
-  6. Re-checks the 19 reference alerts against the rules ("Reference_Calibration" sheet)
+  6. Re-checks the reference alerts against the rules ("Reference_Calibration" sheet)
      so you can see exactly which rule rejected a stock and tune it.
 
 HOW TO RUN IN COLAB
@@ -36,7 +36,7 @@ screenshots by eye; use the calibration sheet to tune them.
 # 0. SETUP
 # ==========================================================================
 import sys, os, io, json, time, zipfile, shutil, warnings, subprocess
-from datetime import datetime, time as dtime
+from datetime import datetime, timedelta, time as dtime
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -74,11 +74,14 @@ CFG = {
     # ---- data ----
     "history_period": "2y",
     "chunk_size": 100,
+    "fill_missing": True,        # fill a missing latest-session bar from the NSE bhavcopy (else Yahoo 15m data)
+    "fill_max_days": 7,          # look back at most this many calendar days for missing sessions
     # ---- scan window / alert logic ----
     "lookback_days": 45,         # list alerts from the last N trading days
     "min_score": 3,              # soft-score needed (0-6) on top of the hard rules
     "max_per_day": 25,           # keep only the best N alerts per day (None = no cap)
-    "cooldown_bars": 5,          # don't re-alert the same stock within N bars
+    "cooldown_bars": 5,          # don't re-alert the same stock within N bars ...
+    "relist_latest": True,       # ... except on the latest session: every stock that qualifies today is listed
     # ---- forward tracking (to verify alerts) ----
     "entry_mode": "close_confirm",   # "close_confirm" = enter at the CLOSE of the first day that closes above the
                                      #   alert-day high (confirmation);  "intraday_cross" = enter as soon as price
@@ -94,7 +97,7 @@ CFG = {
     "max_save": 120,             # charts saved to PNG / zip
     "show_inline": True,
     "out_dir": "scan_output",
-    "run_calibration": True,     # re-test the 19 reference alerts
+    "run_calibration": True,     # re-test the reference alerts
     "download_zip": True,        # auto-download in Colab
 }
 
@@ -107,7 +110,8 @@ RULES = {
     # prior momentum
     "thrust_window": 20, "thrust_lookback": 120, "min_thrust": 0.30,   # best 20-bar run-up in last 120 bars >= 30% ...
     "min_runup_from_low": 0.35,                                         # ... AND close >= 35% above the 120-bar low
-    "trend_runup": 0.60,                                                # ... OR a slower grind: close >= 60% above the 120-bar low
+    "trend_runup": 0.50,                                                # ... OR a slower grind: close >= 50% above the 120-bar low
+                                                                        #     (was 0.60; 0.50 catches staircase trends like NAZARA 3 Nov 2026)
     # location
     "high_lookback": 60, "max_off_high": 0.15,                          # within 15% of 60-bar high
     "max_above_fast": 0.05, "min_vs_fast": -0.02, "min_vs_slow": -0.01, # hugging the ribbon (close vs EMA10 / EMA20)
@@ -126,7 +130,7 @@ RULES = {
 }
 
 # %% ======================================================================
-# 2. REFERENCE ALERTS (from the 19 screenshots)  -  IST timestamps as printed on the charts
+# 2. REFERENCE ALERTS (from the screenshots)  -  IST timestamps as printed on the charts
 #    (name, yahoo symbol, alert time IST, trigger price on chart, last price, timeframe, family, tags)
 # ==========================================================================
 REFERENCE = [
@@ -149,6 +153,8 @@ REFERENCE = [
     ("Knowledge Marine & Eng.",   "KMEW",       "2026-10-06 08:45", 3033.00, 2992.50, "1D", "base",    "Steady uptrend riding ribbon"),
     ("Wheels India",              "WHEELS",     "2026-10-07 21:31", 2315.80, 2283.90, "1D", "base",    "Up Momentum, IB, dry volumes"),
     ("Deep Industries",           "DEEPINDS",   "2026-10-13 18:44", 774.55,  770.00,  "1D", "base",    "Up Momentum, sideways"),
+    # alert time not shown on the chart; daily bar of 3 Nov (high 408.40, close 399.20), broke out to 421.05 on 4 Nov
+    ("Nazara Technologies",       "NAZARA",     "2026-11-03 15:30", None,    399.20,  "1D", "base",    "Staircase uptrend, tight base on 10/20 EMA, dry volumes"),
 ]
 
 # %% ======================================================================
@@ -274,12 +280,116 @@ def fetch_prices(symbols, period="2y", chunk=100, pause=1.0):
     return out
 
 
+def expected_session(now=None):
+    """Latest weekday session that has closed (16:00 IST). Exchange holidays are not known here: a holiday simply
+    has no bhavcopy / intraday data, so nothing gets filled for it."""
+    now = now or datetime.now(IST)
+    d = now.date()
+    if not (now.weekday() < 5 and now.time() >= dtime(16, 0)):
+        d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return pd.Timestamp(d)
+
+
 def drop_incomplete_today(df):
-    """If run during/just after market hours, drop today's unfinished daily bar."""
-    now = datetime.now(IST)
-    if len(df) and df.index[-1].date() == now.date() and now.weekday() < 5 and now.time() < dtime(16, 0):
-        return df.iloc[:-1]
-    return df
+    """Drop any bar newer than the latest closed session (today's unfinished bar during market hours)."""
+    return df[df.index <= expected_session()]
+
+
+def fetch_bhavcopy(day):
+    """NSE equity bhavcopy (UDiFF) for one day -> DataFrame indexed by symbol, or None (holiday / blocked)."""
+    url = f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{day:%Y%m%d}_F_0000.csv.zip"
+    try:
+        r = requests.get(url, headers={**HEADERS, "Accept": "*/*"}, timeout=30)
+        if r.status_code != 200 or not r.content.startswith(b"PK"):
+            return None
+        z = zipfile.ZipFile(io.BytesIO(r.content))
+        b = pd.read_csv(z.open(z.namelist()[0]))
+    except Exception:                                      # noqa: BLE001
+        return None
+    b = b[b["SctySrs"].isin(["EQ", "BE", "BZ", "SM", "ST"])].copy()
+    b["rank"] = b["SctySrs"].map({"EQ": 0, "BE": 1, "BZ": 2, "SM": 3, "ST": 4})
+    b = b.sort_values("rank").drop_duplicates("TckrSymb").set_index("TckrSymb")
+    return b.rename(columns={"OpnPric": "Open", "HghPric": "High", "LwPric": "Low", "ClsPric": "Close",
+                             "TtlTradgVol": "Volume", "PrvsClsgPric": "PrevClose"})[
+        ["Open", "High", "Low", "Close", "Volume", "PrevClose"]]
+
+
+def intraday_daily(symbols, chunk=100):
+    """Daily bars rebuilt from Yahoo 15-minute data (last 5 days) -> {symbol: df}. Fallback only: the close is the
+    last 15-minute close, which can differ a little from NSE's official closing price."""
+    out = {}
+    for k in range(0, len(symbols), chunk):
+        part = [s + ".NS" for s in symbols[k:k + chunk]]
+        try:
+            raw = yf.download(part, period="5d", interval="15m", group_by="ticker", auto_adjust=True,
+                              threads=True, progress=False)
+        except Exception:                                  # noqa: BLE001
+            continue
+        if raw is None or not len(raw):
+            continue
+        if not isinstance(raw.columns, pd.MultiIndex):
+            raw = pd.concat({part[0]: raw}, axis=1)
+        elif {"Close", "Open"} <= set(raw.columns.get_level_values(0)):
+            raw = raw.swaplevel(axis=1)
+        for t in raw.columns.get_level_values(0).unique():
+            d = raw[t].dropna(subset=["Close"])
+            if not len(d):
+                continue
+            idx = d.index.tz_convert(IST) if d.index.tz is not None else d.index
+            g = d.groupby(pd.DatetimeIndex(idx).tz_localize(None).normalize()).agg(
+                Open=("Open", "first"), High=("High", "max"), Low=("Low", "min"),
+                Close=("Close", "last"), Volume=("Volume", "sum"))
+            out[str(t).replace(".NS", "")] = g
+    return out
+
+
+def fill_missing_sessions(prices, cfg):
+    """Yahoo sometimes has no daily bar yet for the latest session (it was missing for most stocks in every late-night
+    GitHub run so far), so every alert of that session was lost.  Fill those bars from the NSE bhavcopy (exact
+    official prices), else rebuild them from Yahoo 15-minute data.  Returns a data-check summary."""
+    E = expected_session()
+    last = {s: d.index[-1] for s, d in prices.items()}
+    info = {"Expected session": str(E.date()), "Stocks": len(prices),
+            "Had the session from Yahoo": sum(v >= E for v in last.values()),
+            "Filled from NSE bhavcopy": 0, "Filled from Yahoo 15m": 0, "Bhavcopy days used": ""}
+    stale = sorted(s for s, v in last.items() if v < E)
+    if not stale or not cfg.get("fill_missing", True):
+        info["Still without the session"] = len(stale)
+        return info
+    oldest = max(min(last[s] for s in stale), E - pd.Timedelta(days=cfg.get("fill_max_days", 7)))
+    days = [d for d in pd.date_range(oldest + pd.Timedelta(days=1), E) if d.weekday() < 5]
+    used = []
+    for day in days:                                      # oldest first, so each fill continues the previous bar
+        b = fetch_bhavcopy(day)
+        if b is None:
+            continue
+        used.append(f"{day:%d %b}")
+        for s in stale:
+            df = prices[s]
+            if df.index[-1] >= day or s not in b.index:
+                continue
+            row = b.loc[s]
+            # continuity: NSE's previous close must be our last close, else a day is missing or a split happened
+            if not (row["Volume"] > 0 and abs(row["PrevClose"] / df["Close"].iloc[-1] - 1) <= 0.02):
+                continue
+            prices[s] = pd.concat([df, pd.DataFrame([row[OHLCV].astype(float)], index=[day])])
+            info["Filled from NSE bhavcopy"] += 1
+    info["Bhavcopy days used"] = ", ".join(used) or "none (NSE not reachable or holiday)"
+    stale = [s for s in stale if prices[s].index[-1] < E]
+    have = info["Had the session from Yahoo"] + info["Filled from NSE bhavcopy"]
+    # 15m fallback only when the session is broadly missing (NSE unreachable); thinly traded names are often absent
+    if stale and have < 0.8 * len(prices):
+        for s, g in intraday_daily(stale, cfg["chunk_size"]).items():
+            df = prices[s]
+            new = g[(g.index > df.index[-1]) & (g.index <= E) & (g["Volume"] > 0)]
+            new = new[(new["Close"] / df["Close"].iloc[-1] - 1).abs() < 0.25]
+            if len(new):
+                prices[s] = pd.concat([df, new[OHLCV]])
+                info["Filled from Yahoo 15m"] += 1
+    info["Still without the session"] = sum(prices[s].index[-1] < E for s in prices)
+    return info
 
 
 # %% ======================================================================
@@ -507,7 +617,10 @@ def scan(prices, names, cfg, R):
         last_i = -10 ** 9
         picked = []
         for i in idx:
-            if i - last_i > cfg["cooldown_bars"]:
+            # the latest session is always listed when it qualifies, so a setup that is still building (e.g. NAZARA
+            # 2 Nov -> 3 Nov 2026) stays on the evening watchlist; older bars keep the cooldown
+            relist = cfg.get("relist_latest", True) and i == len(df) - 1 and df.index[i] == global_last
+            if i - last_i > cfg["cooldown_bars"] or relist:
                 picked.append(i)
                 last_i = i
         if not picked:
@@ -719,8 +832,11 @@ def timing_table():
     return pd.DataFrame(rows)
 
 
-def write_excel(path, alerts, latest, summary, calib, timing, cfg, R):
+def write_excel(path, alerts, latest, summary, calib, timing, cfg, R, data_check=None):
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
+        if data_check:
+            pd.DataFrame(list(data_check.items()), columns=["Check", "Value"]).to_excel(
+                xw, sheet_name="Data_Check", index=False)
         cols = [c for c in alerts.columns if not c.startswith("_") and c != "Latest Session"]
         (latest[cols] if len(latest) else pd.DataFrame(columns=cols)).to_excel(xw, sheet_name="Latest_Watchlist", index=False)
         (alerts[cols] if len(alerts) else pd.DataFrame(columns=cols)).to_excel(xw, sheet_name="All_Alerts", index=False)
@@ -737,7 +853,7 @@ def write_excel(path, alerts, latest, summary, calib, timing, cfg, R):
 
 
 # %% ======================================================================
-# 8. CALIBRATION  (do the rules catch the 19 reference alerts?)
+# 8. CALIBRATION  (do the rules catch the reference alerts?)
 # ==========================================================================
 def calibrate(prices, cfg, R):
     rows = []
@@ -813,6 +929,8 @@ def main(cfg=None, R=None):
     prices = {k: v for k, v in prices.items() if len(v) > 0}
     if not prices:
         raise SystemExit("No price data downloaded. Check your internet / Yahoo access and try again.")
+    data_check = fill_missing_sessions(prices, cfg)
+    print("     data check: " + "; ".join(f"{k} {v}" for k, v in data_check.items()))
     last_date = max(d.index[-1] for d in prices.values()).date()
     print(f"     {len(prices)} stocks with data, latest completed session: {last_date}")
 
@@ -840,7 +958,7 @@ def main(cfg=None, R=None):
 
     calib = None
     if cfg["run_calibration"]:
-        print("5/5  Calibrating against the 19 reference alerts")
+        print(f"5/5  Calibrating against the {len(REFERENCE)} reference alerts")
         refs = sorted({r[1] for r in REFERENCE})
         ref_prices = {k: prices[k] for k in refs if k in prices}
         missing = [s for s in refs if s not in ref_prices]
@@ -855,7 +973,7 @@ def main(cfg=None, R=None):
             print(calib[["Stock", "Alert (IST)", "Result"]].to_string(index=False))
 
     xlsx = os.path.join(out_dir, f"alerts_{last_date}.xlsx")
-    write_excel(xlsx, alerts, latest, summarize_outcomes(alerts, cfg), calib, timing_table(), cfg, R)
+    write_excel(xlsx, alerts, latest, summarize_outcomes(alerts, cfg), calib, timing_table(), cfg, R, data_check)
     with open(os.path.join(out_dir, "rules_used.json"), "w") as fh:
         json.dump({"CFG": {k: (v if not isinstance(v, set) else list(v)) for k, v in cfg.items()}, "RULES": R},
                   fh, indent=2, default=str)
@@ -867,7 +985,7 @@ def main(cfg=None, R=None):
                 full = os.path.join(root, fn)
                 z.write(full, os.path.relpath(full, out_dir))
     print(f"\nDone in {time.time() - t0:.0f}s  ->  {zip_path}  ({os.path.getsize(zip_path) / 1e6:.1f} MB)")
-    print("Tip: 11 of the 19 reference alerts were posted AFTER the close (15:30 IST), mostly 18:00-21:35. "
+    print("Tip: 11 of the first 19 reference alerts were posted AFTER the close (15:30 IST), mostly 18:00-21:35. "
           "Run this after ~16:30 IST so Yahoo's daily bar is final; entry needs a CLOSE above the trigger.")
     if cfg["download_zip"] and IN_COLAB:
         from google.colab import files as colab_files

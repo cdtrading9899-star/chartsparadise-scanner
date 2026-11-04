@@ -47,8 +47,14 @@ def alert_table(df):
 latest, allal = sheets["Latest_Watchlist"], sheets["All_Alerts"]
 now = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y %H:%M IST")
 out = [f"# NSE momentum-base scan\n\nGenerated {now} from `{os.path.basename(xlsx)}`. "
-       f"Full workbook: [latest.xlsx](latest.xlsx).\n",
-       f"## Latest session watchlist ({len(latest)})\n", alert_table(latest)]
+       f"Full workbook: [latest.xlsx](latest.xlsx).\n"]
+if "Data_Check" in sheets:   # how complete the latest session's prices were, and how gaps were filled
+    dc = dict(zip(sheets["Data_Check"]["Check"], sheets["Data_Check"]["Value"]))
+    out.append(f"**Data check, session {dc.get('Expected session')}:** {dc.get('Had the session from Yahoo')} of "
+               f"{dc.get('Stocks')} stocks from Yahoo, {dc.get('Filled from NSE bhavcopy')} filled from the NSE "
+               f"bhavcopy, {dc.get('Filled from Yahoo 15m')} rebuilt from 15-minute data, "
+               f"{dc.get('Still without the session')} without it (usually not traded that day).\n")
+out += [f"## Latest session watchlist ({len(latest)})\n", alert_table(latest)]
 
 for _, r in latest.iterrows():
     f = f"charts/{pd.Timestamp(r['Alert Date']):%Y%m%d}_{r['Symbol']}_s{r['Score (0-6)']}.png".replace("&", "and")
@@ -59,7 +65,7 @@ out += [f"\n## All alerts, last 45 sessions ({len(allal)})\n", alert_table(allal
 out += ["\n## Outcome summary (matured alerts)\n", md_table(sheets["Outcome_Summary"])]
 if "Reference_Calibration" in sheets:
     cal = sheets["Reference_Calibration"][["Stock", "Alert (IST)", "Result"]]
-    out += ["\n## Calibration vs 19 reference alerts\n", md_table(cal)]
+    out += [f"\n## Calibration vs {len(cal)} reference alerts\n", md_table(cal)]
 
 report = "\n".join(out)
 open(f"{DST}/REPORT.md", "w", encoding="utf-8").write(report)
