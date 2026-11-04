@@ -18,7 +18,31 @@ import sys
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-import pandas as pd
+
+def gmail_send(msg, to):
+    user, password = os.environ.get("GMAIL_USER"), os.environ.get("GMAIL_APP_PASSWORD")
+    if not (user and password and to):
+        print("::warning::Email not sent: set the GMAIL_USER and GMAIL_APP_PASSWORD secrets (and MAIL_TO).")
+        return False
+    msg["From"] = user
+    msg["To"] = ", ".join(to)
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60) as s:
+        s.login(user, password)
+        s.sendmail(user, to, msg.as_string())
+    print(f"sent '{msg['Subject']}' to {', '.join(to)}")
+    return True
+
+
+RECIPIENTS = [a.strip() for a in os.environ.get("MAIL_TO", "").split(",") if a.strip()]
+
+# TEST_MESSAGE: send just that text, no scan needed (checks the Gmail setup)
+if os.environ.get("TEST_MESSAGE"):
+    test = MIMEText(os.environ["TEST_MESSAGE"] + "\n", "plain", "utf-8")
+    test["Subject"] = "Test from the NSE scanner"
+    gmail_send(test, RECIPIENTS)
+    sys.exit(0)
+
+import pandas as pd  # noqa: E402
 
 xlsx = sorted(glob.glob("scan_output/alerts_*.xlsx"))
 if not xlsx:
@@ -61,17 +85,6 @@ if done == f"{session:%Y-%m-%d}" and not os.environ.get("FORCE_EMAIL"):
     print(f"Session {day} was already emailed; not sending again.")
     sys.exit(0)
 
-user, password = os.environ.get("GMAIL_USER"), os.environ.get("GMAIL_APP_PASSWORD")
-to = [a.strip() for a in os.environ.get("MAIL_TO", "").split(",") if a.strip()]
-if not (user and password and to):
-    print("::warning::Email not sent: set the GMAIL_USER and GMAIL_APP_PASSWORD secrets (and MAIL_TO).")
-    sys.exit(0)
-
-msg["From"] = user
-msg["To"] = ", ".join(to)
-with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60) as s:
-    s.login(user, password)
-    s.sendmail(user, to, msg.as_string())
-os.makedirs("state", exist_ok=True)
-open(MARKER, "w", encoding="utf-8").write(f"{session:%Y-%m-%d}\n")
-print(f"sent '{subject}' to {', '.join(to)}")
+if gmail_send(msg, RECIPIENTS):
+    os.makedirs("state", exist_ok=True)
+    open(MARKER, "w", encoding="utf-8").write(f"{session:%Y-%m-%d}\n")

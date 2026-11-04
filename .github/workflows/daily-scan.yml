@@ -12,6 +12,10 @@ on:
         description: "Send the email even if this session was already emailed"
         type: boolean
         default: false
+      test_message:
+        description: "Only send this text as a test email (no scan)"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -33,10 +37,13 @@ jobs:
           cache: pip
 
       - run: pip install -r requirements.txt
+        if: ${{ !inputs.test_message }}
 
       - run: python run_scan.py
+        if: ${{ !inputs.test_message }}
 
       - run: python make_report.py
+        if: ${{ !inputs.test_message }}
 
       - name: Email the watchlist
         env:
@@ -44,9 +51,11 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           MAIL_TO: cdtrading9899@gmail.com
           FORCE_EMAIL: ${{ inputs.force_email && '1' || '' }}
+          TEST_MESSAGE: ${{ inputs.test_message }}
         run: python send_email.py
 
       - name: Commit results
+        if: ${{ !inputs.test_message }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -56,6 +65,7 @@ jobs:
           git pull --rebase -q && git push
 
       - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.test_message }}
         with:
           name: scan-${{ github.run_id }}
           path: ChartsParadise_Scan_*.zip
