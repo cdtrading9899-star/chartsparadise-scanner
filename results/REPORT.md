@@ -1,8 +1,8 @@
 # NSE momentum-base scan
 
-Generated 05 Nov 2026 08:06 IST from `alerts_2026-11-04.xlsx`. Full workbook: [latest.xlsx](latest.xlsx).
+Generated 05 Nov 2026 09:22 IST from `alerts_2026-11-04.xlsx`. Full workbook: [latest.xlsx](latest.xlsx).
 
-**Data check, session 2026-11-04:** 808 of 2368 stocks from Yahoo, 1543 filled from the NSE bhavcopy, 0 rebuilt from 15-minute data, 17 without it (usually not traded that day).
+**Data check, session 2026-11-04:** 799 of 2352 stocks from Yahoo, 1535 filled from the NSE bhavcopy, 0 rebuilt from 15-minute data, 18 without it (usually not traded that day).
 
 ## Latest session watchlist (25)
 
