@@ -39,7 +39,7 @@ def alert_table(df):
     if "Alert Date" in d:
         d["Alert Date"] = pd.to_datetime(d["Alert Date"]).dt.strftime("%d %b")
     d["Symbol"] = d["Symbol"].map(lambda s: f"[{s}](https://in.tradingview.com/chart/?symbol=NSE%3A{s})")
-    cols = ["Alert Date", "Symbol", "Name", "Close", "Trigger (alert-day high)", "Stop (5-bar low)",
+    cols = ["Alert Date", "Symbol", "Name", "Alert Type", "Close", "Trigger (alert-day high)", "Stop (5-bar low)",
             "Trigger Gap (%)", "Stop Risk (%)", "Score (0-6)", "Flags", "Status", "Entry", "R Multiple"]
     return md_table(d[[c for c in cols if c in d]])
 

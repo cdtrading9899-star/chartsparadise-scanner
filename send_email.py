@@ -32,7 +32,12 @@ if len(watch) and "Score (0-6)" in watch:
 
 day = f"{session:%d %b %Y}"
 n = len(watch)
-subject = f"NSE scan alerts {day}: {n} stock{'s' if n != 1 else ''}"
+is_repeat = (watch["Alert Type"].astype(str).str.startswith("REPEAT") if "Alert Type" in watch
+             else pd.Series(False, index=watch.index))
+n_rep = int(is_repeat.sum())
+n_new = n - n_rep
+subject = (f"NSE scan alerts {day}: {n_new} new" + (f", {n_rep} repeat{'s' if n_rep != 1 else ''}" if n_rep else "")
+           if "Alert Type" in watch else f"NSE scan alerts {day}: {n} stock{'s' if n != 1 else ''}")
 
 
 def num(x, digits=2):
@@ -57,31 +62,59 @@ for i, (_, r) in enumerate(watch.iterrows(), 1):
         "Score": int(r["Score (0-6)"]),
         "Status": str(r.get("Status", "")).strip(),
         "Flags": str(r.get("Flags", "")).strip(),
+        "Repeat": bool(is_repeat.loc[r.name]),
+        "Days": int(r["Days On List"]) if "Days On List" in r and pd.notna(r["Days On List"]) else 1,
     })
 
 # ---- email body ----
+cols = ["No.", "Symbol", "Name", "Close", "Trigger", "Stop", "Gap", "Risk", "Score"]
+LEFT = ("Symbol", "Name")
+
+
+def html_table(rs, extra=None):
+    head = "".join(f"<th>{c}</th>" for c in cols + ([extra[0]] if extra else []))
+    out = []
+    for r in rs:
+        cells = "".join(
+            f'<td style="text-align:{"left" if c in LEFT else "right"}">{html.escape(str(r[c]))}</td>' for c in cols)
+        if extra:
+            cells += f'<td style="text-align:right">{html.escape(str(extra[1](r)))}</td>'
+        out.append(f"<tr>{cells}</tr>")
+    return ('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-size:13px">'
+            f"<tr>{head}</tr>{''.join(out)}</table>")
+
+
+def text_table(rs):
+    ws = {c: max(len(c), *(len(str(r[c])) for r in rs)) for c in cols}
+    fmt = lambda r: " ".join(
+        (f"{str(r[c]):<{ws[c]}}" if c in LEFT else f"{str(r[c]):>{ws[c]}}") for c in cols)
+    return fmt({c: c for c in cols}) + "\n" + "\n".join(fmt(r) for r in rs)
+
+
+new_rows = [r for r in rows if not r["Repeat"]]
+rep_rows = [r for r in rows if r["Repeat"]]
+for grp in (new_rows, rep_rows):          # renumber each section from 1
+    for i, r in enumerate(grp, 1):
+        r["No."] = i
+
 if rows:
-    cols = ["No.", "Symbol", "Name", "Close", "Trigger", "Stop", "Gap", "Risk", "Score", "Status"]
-    head = "".join(f"<th>{c}</th>" for c in cols)
-    body_rows = "".join(
-        "<tr>" + "".join(
-            f'<td style="text-align:{"left" if c in ("Symbol", "Name", "Status") else "right"}">'
-            f"{html.escape(str(r[c]))}</td>" for c in cols) + "</tr>"
-        for r in rows)
-    body = (f"<p>Alerts for the {day} session ({n}). Trigger = alert-day high; Stop = 5-bar low; "
-            f"Gap = Trigger vs Close; Risk = Close to Stop.</p>"
-            '<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-size:13px">'
-            f"<tr>{head}</tr>{body_rows}</table>")
-    widths = {c: max(len(c), *(len(str(r[c])) for r in rows)) for c in cols[:-1]}
-    line = lambda r: " ".join(
-        (f"{str(r[c]):<{widths[c]}}" if c in ("Symbol", "Name") else f"{str(r[c]):>{widths[c]}}") for c in cols[:-1])
-    text = (f"Alerts for the {day} session ({n})\n\n"
-            + line({c: c for c in cols[:-1]}) + "\n" + "\n".join(line(r) for r in rows) + "\n")
+    legend = ("Trigger = alert-day high; Stop = 5-bar low; Gap = Trigger vs Close; Risk = Close to Stop.")
+    body = f"<p>Alerts for the {day} session. {legend}</p>"
+    text = f"Alerts for the {day} session\n{legend}\n"
+    body += f"<h3>New today ({len(new_rows)})</h3>" + (html_table(new_rows) if new_rows else "<p>None.</p>")
+    text += f"\nNEW TODAY ({len(new_rows)})\n" + (text_table(new_rows) if new_rows else "None.") + "\n"
+    if rep_rows:
+        body += (f"<h3>Still in the setup, listed before ({len(rep_rows)})</h3>"
+                 + html_table(rep_rows, ("Days on list", lambda r: r["Days"])))
+        text += f"\nSTILL IN THE SETUP, LISTED BEFORE ({len(rep_rows)})\n" + text_table(rep_rows) + "\n"
     # ---- compact Telegram text (monospace lines, phone friendly) ----
-    tg_lines = [f"NSE alerts {day}: {n}"]
-    for r in rows:
-        tg_lines.append(f"{r['No.']}. {r['Symbol']}  s{r['Score']}  C {r['Close']}  T {r['Trigger']}  "
-                        f"SL {r['Stop']}  ({r['Gap']}/{r['Risk']})")
+    tg_lines = [f"NSE alerts {day}: {len(new_rows)} new" + (f", {len(rep_rows)} repeat" if rep_rows else "")]
+    tg_line = lambda r: (f"{r['No.']}. {r['Symbol']}  s{r['Score']}  C {r['Close']}  T {r['Trigger']}  "
+                         f"SL {r['Stop']}  ({r['Gap']}/{r['Risk']})")
+    tg_lines += [tg_line(r) for r in new_rows] or ["(no new stocks)"]
+    if rep_rows:
+        tg_lines += ["", "Still in setup (listed before):"] + [
+            f"{r['Symbol']} day {r['Days']}  T {r['Trigger']}" for r in rep_rows]
 else:
     body = f"<p>No alerts for the {day} session.</p>"
     text = f"No alerts for the {day} session.\n"

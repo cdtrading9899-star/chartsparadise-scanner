@@ -82,6 +82,8 @@ CFG = {
     "max_per_day": 25,           # keep only the best N alerts per day (None = no cap)
     "cooldown_bars": 5,          # don't re-alert the same stock within N bars ...
     "relist_latest": True,       # ... except on the latest session: every stock that qualifies today is listed
+    "repeat_mode": "label",      # latest-session stocks that already qualified yesterday (still in the same base):
+                                 #   "label" = keep them, tagged "REPEAT (day N)" / "Days On List";  "hide" = list only NEW ones
     # ---- forward tracking (to verify alerts) ----
     "entry_mode": "close_confirm",   # "close_confirm" = enter at the CLOSE of the first day that closes above the
                                      #   alert-day high (confirmation);  "intraday_cross" = enter as soon as price
@@ -614,12 +616,25 @@ def scan(prices, names, cfg, R):
         f = compute_features(df, R, cfg)
         start = max(0, len(df) - cfg["lookback_days"])
         idx = [i for i in range(start, len(df)) if bool(f["signal"].iloc[i])]
+        sig = f["signal"].values
+
+        def streak(i):
+            """Consecutive sessions (ending at bar i) on which this stock met the setup."""
+            k, j = 0, i
+            while j >= 0 and bool(sig[j]):
+                k += 1
+                j -= 1
+            return k
+
         last_i = -10 ** 9
         picked = []
         for i in idx:
             # the latest session is always listed when it qualifies, so a setup that is still building (e.g. NAZARA
-            # 2 Nov -> 3 Nov 2026) stays on the evening watchlist; older bars keep the cooldown
+            # 2 Nov -> 3 Nov 2026) stays on the evening watchlist; older bars keep the cooldown.
+            # repeat_mode="hide" drops stocks that were already on yesterday's list (same base, no breakout yet).
             relist = cfg.get("relist_latest", True) and i == len(df) - 1 and df.index[i] == global_last
+            if relist and cfg.get("repeat_mode") == "hide" and streak(i) > 1:
+                relist = False
             if i - last_i > cfg["cooldown_bars"] or relist:
                 picked.append(i)
                 last_i = i
@@ -629,6 +644,9 @@ def scan(prices, names, cfg, R):
         for i in picked:
             rec = build_record(sym, names.get(sym, sym), df, f, i, cfg, R)
             rec["Latest Session"] = bool(df.index[i] == global_last)
+            days = streak(i)
+            rec["Days On List"] = days
+            rec["Alert Type"] = "NEW" if days <= 1 else f"REPEAT (day {days})"
             records.append(rec)
     if not records:
         return pd.DataFrame(), keep
