@@ -2,10 +2,11 @@ name: Daily NSE scan
 
 on:
   schedule:
-    # Monday-Friday mornings, before the 6:00 IST email deadline. Each run scans the last closed session.
-    # Two slots because GitHub can start scheduled runs late; only the first run per session sends the email.
-    - cron: "17 22 * * 0-4"   # 03:47 IST Mon-Fri (22:17 UTC Sun-Thu)
-    - cron: "47 23 * * 0-4"   # 05:17 IST Mon-Fri (23:47 UTC Sun-Thu), backup
+    # Monday-Friday evenings, after the NSE bhavcopy is out (the scan treats a run after 16:00 IST as that day's
+    # session). Run early so GitHub's multi-hour schedule delays still land before the next morning.
+    # Two slots: only the first run per session sends the alert (state/emailed_session.txt).
+    - cron: "30 14 * * 1-5"   # 20:00 IST Mon-Fri
+    - cron: "30 15 * * 1-5"   # 21:00 IST Mon-Fri, backup
   workflow_dispatch:
     inputs:
       force_email:
@@ -38,11 +39,14 @@ jobs:
 
       - run: python make_report.py
 
-      - name: Email the watchlist
+      - name: Send the watchlist (email + Telegram)
+        continue-on-error: true   # still commit results/marker if a channel fails
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           MAIL_TO: cdtrading9899@gmail.com
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           FORCE_EMAIL: ${{ inputs.force_email && '1' || '' }}
         run: python send_email.py
 
